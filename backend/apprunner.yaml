@@ -2,9 +2,9 @@ version: 1.0
 runtime: python311
 build:
   commands:
-    - echo "Build complete"
+    - pip3 install -r requirements.txt
 run:
-  command: bash start.sh
+  command: python3 main.py
   network:
     port: 8080
   env:
