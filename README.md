@@ -1,36 +1,66 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# UN Translator
+
+Real-time speech-to-speech translation PWA that works like a UN interpreter. Point your phone's microphone at someone speaking another language and hear the translation in your headphones in near real-time.
+
+## Features
+
+- 🎙️ Real-time audio capture
+- 🌐 Multi-language translation
+- 🎧 Headphone-optimized output
+- 📱 Mobile-first PWA design
+- ☁️ AWS Amplify deployment
+
+## Tech Stack
+
+- **Frontend:** Next.js + React + TypeScript + Tailwind CSS
+- **Audio:** Web Audio API
+- **Translation:** Amazon Nova Sonic (speech-to-speech)
+- **Hosting:** AWS Amplify
 
 ## Getting Started
 
-First, run the development server:
+### Prerequisites
+
+- Node.js 18+
+- npm or yarn
+
+### Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/marceloacosta/un_translator.git
+cd un_translator
+
+# Install dependencies
+npm install
+
+# Run development server
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) with your browser.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Testing Audio
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Open the app in your browser
+2. Put on headphones
+3. Click "Test Audio Loopback"
+4. Speak into your microphone
+5. You should hear yourself through your headphones
 
-## Learn More
+## Deployment
 
-To learn more about Next.js, take a look at the following resources:
+This project is deployed on AWS Amplify. Push to the `main` branch to trigger automatic deployment.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Project Status
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+🚧 **Work in Progress**
 
-## Deploy on Vercel
+- [x] Audio loopback test
+- [ ] Nova Sonic integration
+- [ ] Real-time translation
+- [ ] PWA optimization
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## License
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+MIT
