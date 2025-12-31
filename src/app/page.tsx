@@ -2,8 +2,8 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 
-// Backend URL - will be configured for production
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'ws://localhost:8000';
+// Backend URL - App Runner WebSocket endpoint
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'wss://2pmaeb9qfx.us-east-1.awsapprunner.com';
 
 export default function Home() {
   const [isRecording, setIsRecording] = useState(false);
