@@ -270,9 +270,13 @@ export default function Home() {
             }
           };
 
-          // Connect: microphone -> processor (need to connect to destination for it to work)
+          // Connect: microphone -> processor -> silent gain (NOT to speakers - no echo)
+          // ScriptProcessor needs to be connected to work, but we use a silent gain node
+          const silentGain = audioContextRef.current.createGain();
+          silentGain.gain.value = 0; // Silent - no local playback
           sourceNodeRef.current.connect(processorNodeRef.current);
-          processorNodeRef.current.connect(audioContextRef.current.destination);
+          processorNodeRef.current.connect(silentGain);
+          silentGain.connect(audioContextRef.current.destination);
 
           setIsTranslating(true);
           setIsRecording(true);
