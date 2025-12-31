@@ -1,9 +1,10 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { io, Socket } from 'socket.io-client';
 
-// Backend URL - App Runner WebSocket endpoint
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'wss://2pmaeb9qfx.us-east-1.awsapprunner.com';
+// Backend URL - App Runner endpoint
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'https://bxwrirugzt.us-east-1.awsapprunner.com';
 
 export default function Home() {
   const [isRecording, setIsRecording] = useState(false);
@@ -16,11 +17,12 @@ export default function Home() {
 
   // Audio refs
   const audioContextRef = useRef<AudioContext | null>(null);
+  const playbackContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
   const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
-  const websocketRef = useRef<WebSocket | null>(null);
+  const socketRef = useRef<Socket | null>(null);
 
   // Check browser compatibility
   useEffect(() => {
@@ -71,10 +73,17 @@ export default function Home() {
       audioContextRef.current = null;
     }
 
-    // Close WebSocket
-    if (websocketRef.current) {
-      websocketRef.current.close();
-      websocketRef.current = null;
+    // Close playback context
+    if (playbackContextRef.current && playbackContextRef.current.state !== 'closed') {
+      playbackContextRef.current.close();
+      playbackContextRef.current = null;
+    }
+
+    // Disconnect Socket.IO
+    if (socketRef.current) {
+      socketRef.current.emit('endSession');
+      socketRef.current.disconnect();
+      socketRef.current = null;
     }
 
     setIsRecording(false);
@@ -140,29 +149,80 @@ export default function Home() {
     }
   };
 
-  // Translation with WebSocket backend
+  // Play received audio (base64 encoded PCM at 24kHz)
+  const playAudioBase64 = useCallback(async (base64Audio: string) => {
+    try {
+      // Create playback context if needed
+      if (!playbackContextRef.current || playbackContextRef.current.state === 'closed') {
+        const AudioContextClass = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (!AudioContextClass) return;
+        playbackContextRef.current = new AudioContextClass({ sampleRate: 24000 });
+      }
+
+      // Decode base64 to binary
+      const binaryString = atob(base64Audio);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      // Convert to Int16 array (16-bit PCM)
+      const int16Array = new Int16Array(bytes.buffer);
+      
+      // Convert Int16 to Float32 for Web Audio API
+      const float32Array = new Float32Array(int16Array.length);
+      for (let i = 0; i < int16Array.length; i++) {
+        float32Array[i] = int16Array[i] / 32768;
+      }
+
+      // Create audio buffer
+      const audioBuffer = playbackContextRef.current.createBuffer(1, float32Array.length, 24000);
+      audioBuffer.getChannelData(0).set(float32Array);
+
+      // Play the audio
+      const source = playbackContextRef.current.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(playbackContextRef.current.destination);
+      source.start();
+
+    } catch (e) {
+      console.error('Error playing audio:', e);
+    }
+  }, []);
+
+  // Translation with Socket.IO backend
   const startTranslation = async () => {
     try {
       console.log('🌐 Starting translation...');
       setAudioError(null);
       setConnectionStatus('connecting');
+      setTranscript({ source: '', translated: '' });
 
-      // Connect to WebSocket
-      const wsUrl = `${BACKEND_URL}/ws/translate?source=${sourceLang}&target=${targetLang}`;
-      console.log('🔌 Connecting to:', wsUrl);
+      // Connect to Socket.IO
+      console.log('🔌 Connecting to:', BACKEND_URL);
       
-      websocketRef.current = new WebSocket(wsUrl);
+      socketRef.current = io(BACKEND_URL, {
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        reconnectionAttempts: 3,
+      });
 
-      websocketRef.current.onopen = async () => {
-        console.log('✅ WebSocket connected');
+      socketRef.current.on('connect', async () => {
+        console.log('✅ Socket.IO connected');
         setConnectionStatus('connected');
 
-        // Request microphone access
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          throw new Error('getUserMedia is not supported in this browser');
-        }
+        // Start session with language config
+        socketRef.current?.emit('startSession', {
+          sourceLang,
+          targetLang
+        });
+      });
+
+      socketRef.current.on('sessionReady', async (data) => {
+        console.log('✅ Session ready:', data);
 
         try {
+          // Request microphone access
           const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
               echoCancellation: true,
@@ -187,12 +247,10 @@ export default function Home() {
           sourceNodeRef.current = audioContextRef.current.createMediaStreamSource(stream);
 
           // Create script processor for capturing audio data
-          // Note: ScriptProcessorNode is deprecated but works for now
-          // TODO: Migrate to AudioWorklet for better performance
           processorNodeRef.current = audioContextRef.current.createScriptProcessor(4096, 1, 1);
 
           processorNodeRef.current.onaudioprocess = (e) => {
-            if (websocketRef.current?.readyState === WebSocket.OPEN) {
+            if (socketRef.current?.connected) {
               const inputData = e.inputBuffer.getChannelData(0);
               // Convert Float32 to Int16 PCM
               const pcmData = new Int16Array(inputData.length);
@@ -200,100 +258,78 @@ export default function Home() {
                 const s = Math.max(-1, Math.min(1, inputData[i]));
                 pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
               }
-              websocketRef.current.send(pcmData.buffer);
+              
+              // Convert to base64 and send
+              const bytes = new Uint8Array(pcmData.buffer);
+              let binary = '';
+              for (let i = 0; i < bytes.length; i++) {
+                binary += String.fromCharCode(bytes[i]);
+              }
+              const base64Audio = btoa(binary);
+              socketRef.current.emit('audioData', base64Audio);
             }
           };
 
-          // Connect: microphone -> processor
+          // Connect: microphone -> processor (need to connect to destination for it to work)
           sourceNodeRef.current.connect(processorNodeRef.current);
           processorNodeRef.current.connect(audioContextRef.current.destination);
 
-          // Send start message
-          websocketRef.current.send(JSON.stringify({ type: 'start' }));
           setIsTranslating(true);
           setIsRecording(true);
+          console.log('🎤 Audio capture started');
 
         } catch (micError) {
           console.error('❌ Microphone error:', micError);
           setAudioError(micError instanceof Error ? micError.message : 'Failed to access microphone');
-          websocketRef.current?.close();
+          socketRef.current?.disconnect();
         }
-      };
+      });
 
-      websocketRef.current.onmessage = (event) => {
-        try {
-          if (typeof event.data === 'string') {
-            const data = JSON.parse(event.data);
-            console.log('📨 Received:', data);
+      // Handle audio output from Nova Sonic
+      socketRef.current.on('audioOutput', (base64Audio: string) => {
+        console.log('🔊 Received audio output');
+        playAudioBase64(base64Audio);
+      });
 
-            if (data.type === 'transcript') {
-              if (data.role === 'user') {
-                setTranscript(prev => ({ ...prev, source: data.text }));
-              } else if (data.role === 'assistant') {
-                setTranscript(prev => ({ ...prev, translated: data.text }));
-              }
-            } else if (data.type === 'status') {
-              console.log('📊 Status:', data.message);
-            } else if (data.type === 'error') {
-              console.error('⚠️ Backend error:', data.message);
-              setAudioError(data.message);
-            }
-          } else if (event.data instanceof Blob) {
-            // Audio data from backend - play it
-            event.data.arrayBuffer().then(buffer => {
-              playAudioBuffer(buffer);
-            });
-          }
-        } catch (e) {
-          console.error('Error processing message:', e);
+      // Handle text transcription
+      socketRef.current.on('textOutput', (data: { text: string }) => {
+        console.log('📝 Text output:', data.text);
+        setTranscript(prev => ({ ...prev, translated: prev.translated + data.text }));
+      });
+
+      // Handle content start (to know whose turn it is)
+      socketRef.current.on('contentStart', (data: { role: string }) => {
+        console.log('📍 Content start:', data.role);
+        if (data.role === 'USER') {
+          // Clear previous transcript when user starts speaking
+          setTranscript(prev => ({ ...prev, source: '' }));
+        } else if (data.role === 'ASSISTANT') {
+          setTranscript(prev => ({ ...prev, translated: '' }));
         }
-      };
+      });
 
-      websocketRef.current.onerror = (error) => {
-        console.error('❌ WebSocket error:', error);
+      socketRef.current.on('error', (data: { message: string }) => {
+        console.error('⚠️ Backend error:', data.message);
+        setAudioError(data.message);
+      });
+
+      socketRef.current.on('connect_error', (error) => {
+        console.error('❌ Connection error:', error);
         setAudioError('Connection error. Is the backend running?');
         setConnectionStatus('disconnected');
-      };
+      });
 
-      websocketRef.current.onclose = () => {
-        console.log('🔌 WebSocket closed');
+      socketRef.current.on('disconnect', () => {
+        console.log('🔌 Socket.IO disconnected');
         setConnectionStatus('disconnected');
         setIsTranslating(false);
-      };
+      });
 
     } catch (error) {
       console.error('❌ Error starting translation:', error);
       const errorMessage = error instanceof Error ? error.message : 'Failed to start translation';
       setAudioError(errorMessage);
       setConnectionStatus('disconnected');
-    }
-  };
-
-  // Play received audio buffer
-  const playAudioBuffer = async (buffer: ArrayBuffer) => {
-    try {
-      if (!audioContextRef.current) return;
-
-      // Create a new AudioContext for playback if needed
-      const playbackContext = new (window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext!)();
-
-      // Decode the audio data (assuming 24kHz 16-bit PCM from Nova Sonic)
-      const int16Array = new Int16Array(buffer);
-      const float32Array = new Float32Array(int16Array.length);
-      for (let i = 0; i < int16Array.length; i++) {
-        float32Array[i] = int16Array[i] / 32768;
-      }
-
-      const audioBuffer = playbackContext.createBuffer(1, float32Array.length, 24000);
-      audioBuffer.getChannelData(0).set(float32Array);
-
-      const source = playbackContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(playbackContext.destination);
-      source.start();
-
-    } catch (e) {
-      console.error('Error playing audio:', e);
     }
   };
 
@@ -446,7 +482,7 @@ export default function Home() {
                   : 'bg-slate-500'
               }`}></div>
               {connectionStatus === 'connected'
-                ? 'Connected to Backend'
+                ? 'Connected to Nova Sonic'
                 : connectionStatus === 'connecting'
                 ? 'Connecting...'
                 : 'Disconnected'}
