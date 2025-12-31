@@ -1,0 +1,18 @@
+{
+  "name": "un-translator-backend",
+  "version": "1.0.0",
+  "description": "UN Translator - Real-time speech-to-speech translation using Amazon Nova Sonic",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.785.0",
+    "@aws-sdk/credential-provider-node": "^3.785.0",
+    "@smithy/node-http-handler": "^4.0.4",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1",
+    "uuid": "^11.1.0"
+  }
+}
+
