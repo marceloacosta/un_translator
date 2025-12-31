@@ -1,0 +1,16 @@
+version: 1.0
+runtime: python312
+build:
+  commands:
+    build:
+      - pip install -r requirements.txt
+run:
+  command: uvicorn main:app --host 0.0.0.0 --port 8080
+  network:
+    port: 8080
+    env:
+      - name: AWS_REGION
+        value: "us-east-1"
+  env:
+    - name: AWS_REGION
+      value: "us-east-1"

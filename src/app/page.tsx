@@ -1,25 +1,57 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+
+// Backend URL - will be configured for production
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'ws://localhost:8000';
 
 export default function Home() {
   const [isRecording, setIsRecording] = useState(false);
-  const [sourceLang, setSourceLang] = useState('en');
-  const [targetLang, setTargetLang] = useState('es');
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [sourceLang, setSourceLang] = useState('en-US');
+  const [targetLang, setTargetLang] = useState('es-US');
   const [audioError, setAudioError] = useState<string | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
+  const [transcript, setTranscript] = useState<{ source: string; translated: string }>({ source: '', translated: '' });
 
   // Audio refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
+  const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const websocketRef = useRef<WebSocket | null>(null);
 
-  // Audio functions
-  const stopAudioLoopback = () => {
+  // Check browser compatibility
+  useEffect(() => {
+    const checkCompatibility = () => {
+      const hasGetUserMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+      const hasAudioContext = !!(window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext);
+
+      if (!hasGetUserMedia) {
+        setAudioError('This browser does not support microphone access');
+      } else if (!hasAudioContext) {
+        setAudioError('This browser does not support Web Audio API');
+      } else if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+        setAudioError('Microphone access requires HTTPS (or localhost for development)');
+      }
+    };
+
+    checkCompatibility();
+  }, []);
+
+  // Stop audio and cleanup
+  const stopAudio = useCallback(() => {
     // Stop media stream
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(track => track.stop());
       mediaStreamRef.current = null;
+    }
+
+    // Disconnect processor node
+    if (processorNodeRef.current) {
+      processorNodeRef.current.disconnect();
+      processorNodeRef.current = null;
     }
 
     // Disconnect audio nodes
@@ -39,48 +71,36 @@ export default function Home() {
       audioContextRef.current = null;
     }
 
+    // Close WebSocket
+    if (websocketRef.current) {
+      websocketRef.current.close();
+      websocketRef.current = null;
+    }
+
     setIsRecording(false);
+    setIsTranslating(false);
+    setConnectionStatus('disconnected');
     setAudioError(null);
-  };
-
-  // Check browser compatibility
-  useEffect(() => {
-    const checkCompatibility = () => {
-      const hasGetUserMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-      const hasAudioContext = !!(window.AudioContext || (window as any).webkitAudioContext);
-
-      if (!hasGetUserMedia) {
-        setAudioError('This browser does not support microphone access');
-      } else if (!hasAudioContext) {
-        setAudioError('This browser does not support Web Audio API');
-      } else if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
-        setAudioError('Microphone access requires HTTPS (or localhost for development)');
-      }
-    };
-
-    checkCompatibility();
   }, []);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopAudioLoopback();
+      stopAudio();
     };
-  }, []);
+  }, [stopAudio]);
 
-  // Audio loopback functions
+  // Audio loopback test (local echo)
   const startAudioLoopback = async () => {
     try {
       console.log('🎙️ Starting audio loopback...');
       setAudioError(null);
 
-      // Check if getUserMedia is supported
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error('getUserMedia is not supported in this browser');
       }
 
       console.log('🎤 Requesting microphone access...');
-      // Request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: false,
@@ -93,26 +113,20 @@ export default function Home() {
       mediaStreamRef.current = stream;
 
       // Create audio context
-      console.log('🔊 Creating audio context...');
-      const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioContextClass = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextClass) throw new Error('AudioContext not available');
       audioContextRef.current = new AudioContextClass();
 
-      // Resume audio context if needed (required by some browsers)
       if (audioContextRef.current.state === 'suspended') {
         await audioContextRef.current.resume();
-        console.log('▶️ Audio context resumed');
       }
 
-      // Create source node from microphone
-      console.log('🎚️ Creating audio nodes...');
+      // Create audio nodes
       sourceNodeRef.current = audioContextRef.current.createMediaStreamSource(stream);
-
-      // Create gain node for volume control
       gainNodeRef.current = audioContextRef.current.createGain();
-      gainNodeRef.current.gain.value = 0.8; // Slightly reduce volume to prevent feedback
+      gainNodeRef.current.gain.value = 0.8;
 
-      // Connect: microphone -> gain -> speakers (loopback)
-      console.log('🔗 Connecting audio nodes...');
+      // Connect: microphone -> gain -> speakers
       sourceNodeRef.current.connect(gainNodeRef.current);
       gainNodeRef.current.connect(audioContextRef.current.destination);
 
@@ -126,15 +140,176 @@ export default function Home() {
     }
   };
 
-  const toggleAudioLoopback = () => {
-    console.log('🔘 Toggle button clicked, current state:', isRecording);
+  // Translation with WebSocket backend
+  const startTranslation = async () => {
+    try {
+      console.log('🌐 Starting translation...');
+      setAudioError(null);
+      setConnectionStatus('connecting');
 
+      // Connect to WebSocket
+      const wsUrl = `${BACKEND_URL}/ws/translate?source=${sourceLang}&target=${targetLang}`;
+      console.log('🔌 Connecting to:', wsUrl);
+      
+      websocketRef.current = new WebSocket(wsUrl);
+
+      websocketRef.current.onopen = async () => {
+        console.log('✅ WebSocket connected');
+        setConnectionStatus('connected');
+
+        // Request microphone access
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('getUserMedia is not supported in this browser');
+        }
+
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              sampleRate: 16000,
+            }
+          });
+
+          mediaStreamRef.current = stream;
+
+          // Create audio context for processing
+          const AudioContextClass = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+          if (!AudioContextClass) throw new Error('AudioContext not available');
+          audioContextRef.current = new AudioContextClass({ sampleRate: 16000 });
+
+          if (audioContextRef.current.state === 'suspended') {
+            await audioContextRef.current.resume();
+          }
+
+          // Create source node
+          sourceNodeRef.current = audioContextRef.current.createMediaStreamSource(stream);
+
+          // Create script processor for capturing audio data
+          // Note: ScriptProcessorNode is deprecated but works for now
+          // TODO: Migrate to AudioWorklet for better performance
+          processorNodeRef.current = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+
+          processorNodeRef.current.onaudioprocess = (e) => {
+            if (websocketRef.current?.readyState === WebSocket.OPEN) {
+              const inputData = e.inputBuffer.getChannelData(0);
+              // Convert Float32 to Int16 PCM
+              const pcmData = new Int16Array(inputData.length);
+              for (let i = 0; i < inputData.length; i++) {
+                const s = Math.max(-1, Math.min(1, inputData[i]));
+                pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+              }
+              websocketRef.current.send(pcmData.buffer);
+            }
+          };
+
+          // Connect: microphone -> processor
+          sourceNodeRef.current.connect(processorNodeRef.current);
+          processorNodeRef.current.connect(audioContextRef.current.destination);
+
+          // Send start message
+          websocketRef.current.send(JSON.stringify({ type: 'start' }));
+          setIsTranslating(true);
+          setIsRecording(true);
+
+        } catch (micError) {
+          console.error('❌ Microphone error:', micError);
+          setAudioError(micError instanceof Error ? micError.message : 'Failed to access microphone');
+          websocketRef.current?.close();
+        }
+      };
+
+      websocketRef.current.onmessage = (event) => {
+        try {
+          if (typeof event.data === 'string') {
+            const data = JSON.parse(event.data);
+            console.log('📨 Received:', data);
+
+            if (data.type === 'transcript') {
+              if (data.role === 'user') {
+                setTranscript(prev => ({ ...prev, source: data.text }));
+              } else if (data.role === 'assistant') {
+                setTranscript(prev => ({ ...prev, translated: data.text }));
+              }
+            } else if (data.type === 'status') {
+              console.log('📊 Status:', data.message);
+            } else if (data.type === 'error') {
+              console.error('⚠️ Backend error:', data.message);
+              setAudioError(data.message);
+            }
+          } else if (event.data instanceof Blob) {
+            // Audio data from backend - play it
+            event.data.arrayBuffer().then(buffer => {
+              playAudioBuffer(buffer);
+            });
+          }
+        } catch (e) {
+          console.error('Error processing message:', e);
+        }
+      };
+
+      websocketRef.current.onerror = (error) => {
+        console.error('❌ WebSocket error:', error);
+        setAudioError('Connection error. Is the backend running?');
+        setConnectionStatus('disconnected');
+      };
+
+      websocketRef.current.onclose = () => {
+        console.log('🔌 WebSocket closed');
+        setConnectionStatus('disconnected');
+        setIsTranslating(false);
+      };
+
+    } catch (error) {
+      console.error('❌ Error starting translation:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to start translation';
+      setAudioError(errorMessage);
+      setConnectionStatus('disconnected');
+    }
+  };
+
+  // Play received audio buffer
+  const playAudioBuffer = async (buffer: ArrayBuffer) => {
+    try {
+      if (!audioContextRef.current) return;
+
+      // Create a new AudioContext for playback if needed
+      const playbackContext = new (window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext!)();
+
+      // Decode the audio data (assuming 24kHz 16-bit PCM from Nova Sonic)
+      const int16Array = new Int16Array(buffer);
+      const float32Array = new Float32Array(int16Array.length);
+      for (let i = 0; i < int16Array.length; i++) {
+        float32Array[i] = int16Array[i] / 32768;
+      }
+
+      const audioBuffer = playbackContext.createBuffer(1, float32Array.length, 24000);
+      audioBuffer.getChannelData(0).set(float32Array);
+
+      const source = playbackContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(playbackContext.destination);
+      source.start();
+
+    } catch (e) {
+      console.error('Error playing audio:', e);
+    }
+  };
+
+  const toggleAudioLoopback = () => {
     if (isRecording) {
-      console.log('🛑 Stopping audio loopback...');
-      stopAudioLoopback();
+      stopAudio();
     } else {
-      console.log('▶️ Starting audio loopback...');
       startAudioLoopback();
+    }
+  };
+
+  const toggleTranslation = () => {
+    if (isTranslating) {
+      stopAudio();
+    } else {
+      startTranslation();
     }
   };
 
@@ -160,13 +335,14 @@ export default function Home() {
                 value={sourceLang}
                 onChange={(e) => setSourceLang(e.target.value)}
                 className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                disabled={isRecording}
               >
-                <option value="en">English</option>
-                <option value="es">Spanish</option>
-                <option value="fr">French</option>
-                <option value="de">German</option>
-                <option value="it">Italian</option>
-                <option value="pt">Portuguese</option>
+                <option value="en-US">English (US)</option>
+                <option value="es-US">Spanish (US)</option>
+                <option value="fr-FR">French</option>
+                <option value="de-DE">German</option>
+                <option value="it-IT">Italian</option>
+                <option value="pt-BR">Portuguese (Brazil)</option>
               </select>
             </div>
 
@@ -188,13 +364,14 @@ export default function Home() {
                 value={targetLang}
                 onChange={(e) => setTargetLang(e.target.value)}
                 className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                disabled={isRecording}
               >
-                <option value="es">Spanish</option>
-                <option value="en">English</option>
-                <option value="fr">French</option>
-                <option value="de">German</option>
-                <option value="it">Italian</option>
-                <option value="pt">Portuguese</option>
+                <option value="es-US">Spanish (US)</option>
+                <option value="en-US">English (US)</option>
+                <option value="fr-FR">French</option>
+                <option value="de-DE">German</option>
+                <option value="it-IT">Italian</option>
+                <option value="pt-BR">Portuguese (Brazil)</option>
               </select>
             </div>
           </div>
@@ -214,7 +391,7 @@ export default function Home() {
                   </span>
                 </div>
                 <p className="text-slate-300 leading-relaxed">
-                  {isRecording ? '🎤 Speak into microphone - testing audio input' : 'Audio input area (for future speech recognition)'}
+                  {transcript.source || (isRecording ? '🎤 Listening for speech...' : 'Speech will appear here')}
                 </p>
               </div>
             </div>
@@ -224,13 +401,13 @@ export default function Home() {
               <h3 className="text-sm font-medium text-slate-300 mb-2">Live Translation</h3>
               <div className="bg-slate-900 rounded-md p-4 min-h-[120px] border border-slate-600">
                 <div className="flex items-center space-x-2 mb-2">
-                  <div className={`w-2 h-2 rounded-full ${isRecording ? 'bg-blue-400 animate-pulse' : 'bg-slate-600'}`}></div>
+                  <div className={`w-2 h-2 rounded-full ${isTranslating ? 'bg-blue-400 animate-pulse' : 'bg-slate-600'}`}></div>
                   <span className="text-xs text-slate-400">
-                    {isRecording ? 'Translating...' : 'Translation ready'}
+                    {isTranslating ? 'Translating...' : 'Translation ready'}
                   </span>
                 </div>
                 <p className="text-blue-300 leading-relaxed italic">
-                  {isRecording ? '🔊 Audio output through headphones (echo test)' : 'Audio output area (for future translated speech)'}
+                  {transcript.translated || (isTranslating ? '🔊 Translation will appear here...' : 'Translation will appear here')}
                 </p>
               </div>
             </div>
@@ -239,62 +416,75 @@ export default function Home() {
 
         {/* Control Panel */}
         <div className="bg-slate-800 rounded-lg p-6 border border-slate-700">
-          <div className="flex flex-col gap-4 items-center justify-center">
-            {/* Audio Loopback Test Button */}
+          <div className="flex flex-col gap-6 items-center justify-center">
+            {/* Main Translation Button */}
             <button
-              onClick={toggleAudioLoopback}
+              onClick={toggleTranslation}
               className={`px-12 py-6 rounded-full font-bold text-xl transition-all duration-300 ${
-                isRecording
+                isTranslating
                   ? 'bg-red-600 hover:bg-red-700 shadow-red-500/25 animate-pulse'
-                  : 'bg-green-600 hover:bg-green-700 shadow-green-500/25'
+                  : 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/25'
               } text-white shadow-2xl hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed`}
-              disabled={!!audioError}
+              disabled={!!audioError || (isRecording && !isTranslating)}
             >
-              {isRecording ? '🔴 Stop Audio Test' : '🎧 Test Audio Loopback'}
+              {isTranslating ? '🔴 Stop Translation' : '🌐 Start Translation'}
             </button>
 
-            {/* Audio Test Status */}
-            <div className="text-center space-y-3">
-              <div className={`inline-flex items-center px-6 py-3 rounded-full text-base font-medium transition-all duration-300 ${
-                audioError
-                  ? 'bg-red-900/50 text-red-300 border border-red-700'
-                  : isRecording
-                  ? 'bg-green-900/50 text-green-300 border border-green-700 shadow-green-500/20'
-                  : 'bg-slate-700 text-slate-300 border border-slate-600'
-              }`}>
-                <div className={`w-3 h-3 rounded-full mr-3 ${
-                  audioError
-                    ? 'bg-red-500'
-                    : isRecording
-                    ? 'bg-green-400 animate-pulse'
-                    : 'bg-slate-500'
-                }`}></div>
-                {audioError
-                  ? 'Audio Error'
-                  : isRecording
-                  ? 'Audio Loopback Active'
-                  : 'Ready for Audio Test'}
-              </div>
+            {/* Connection Status */}
+            <div className={`inline-flex items-center px-4 py-2 rounded-full text-sm font-medium ${
+              connectionStatus === 'connected'
+                ? 'bg-green-900/50 text-green-300 border border-green-700'
+                : connectionStatus === 'connecting'
+                ? 'bg-yellow-900/50 text-yellow-300 border border-yellow-700'
+                : 'bg-slate-700 text-slate-300 border border-slate-600'
+            }`}>
+              <div className={`w-2 h-2 rounded-full mr-2 ${
+                connectionStatus === 'connected'
+                  ? 'bg-green-400'
+                  : connectionStatus === 'connecting'
+                  ? 'bg-yellow-400 animate-pulse'
+                  : 'bg-slate-500'
+              }`}></div>
+              {connectionStatus === 'connected'
+                ? 'Connected to Backend'
+                : connectionStatus === 'connecting'
+                ? 'Connecting...'
+                : 'Disconnected'}
+            </div>
 
-              {/* Instructions */}
-              <div className="max-w-md space-y-1">
-                {audioError ? (
-                  <p className="text-sm text-red-400">{audioError}</p>
-                ) : isRecording ? (
-                  <>
-                    <p className="text-sm text-slate-400">
-                      🎤 Speak into your microphone - you should hear yourself through headphones
-                    </p>
-                    <p className="text-xs text-slate-500">
-                      This tests the basic audio pipeline before adding translation
-                    </p>
-                  </>
-                ) : (
-                  <p className="text-sm text-slate-400">
-                    Click &quot;Test Audio Loopback&quot; to verify microphone and headphone audio works
-                  </p>
-                )}
-              </div>
+            {/* Divider */}
+            <div className="w-full border-t border-slate-700 my-2"></div>
+
+            {/* Audio Test Button */}
+            <button
+              onClick={toggleAudioLoopback}
+              className={`px-8 py-3 rounded-full font-medium text-sm transition-all duration-300 ${
+                isRecording && !isTranslating
+                  ? 'bg-red-600 hover:bg-red-700'
+                  : 'bg-slate-600 hover:bg-slate-500'
+              } text-white disabled:opacity-50 disabled:cursor-not-allowed`}
+              disabled={!!audioError || isTranslating}
+            >
+              {isRecording && !isTranslating ? '🛑 Stop Audio Test' : '🎧 Test Audio (Echo)'}
+            </button>
+
+            {/* Status and Instructions */}
+            <div className="text-center space-y-2 max-w-md">
+              {audioError ? (
+                <p className="text-sm text-red-400">{audioError}</p>
+              ) : isTranslating ? (
+                <p className="text-sm text-slate-400">
+                  🎤 Speaking now... Translation will play through headphones
+                </p>
+              ) : isRecording ? (
+                <p className="text-sm text-slate-400">
+                  🎧 Audio loopback active - you should hear yourself
+                </p>
+              ) : (
+                <p className="text-sm text-slate-400">
+                  Click &quot;Start Translation&quot; for real-time UN-style translation
+                </p>
+              )}
             </div>
           </div>
         </div>

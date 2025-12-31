@@ -55,6 +55,12 @@ journal.md
 venv/
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+
+# Backend specific
+backend/.venv/
+backend/.env
 
 #amplify-do-not-edit-begin
 amplify/\#current-cloud-backend
