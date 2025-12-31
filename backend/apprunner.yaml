@@ -3,7 +3,7 @@ runtime: python311
 build:
   commands:
     build:
-      - python3 -m pip install -r requirements.txt
+      - pip3 install --target . -r requirements.txt
 run:
   command: python3 -m uvicorn main:app --host 0.0.0.0 --port 8080
   network:
@@ -11,3 +11,5 @@ run:
   env:
     - name: AWS_REGION
       value: "us-east-1"
+    - name: PYTHONPATH
+      value: "/app/backend"
