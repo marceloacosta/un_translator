@@ -4,6 +4,7 @@
 
 const express = require('express');
 const http = require('http');
+const cors = require('cors');
 const { Server } = require('socket.io');
 const { 
   BedrockRuntimeClient, 
@@ -14,12 +15,19 @@ const { defaultProvider } = require('@aws-sdk/credential-provider-node');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
+
+// Enable CORS for all routes
+app.use(cors());
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: '*',
-    methods: ['GET', 'POST']
-  }
+    methods: ['GET', 'POST'],
+    credentials: true
+  },
+  transports: ['websocket', 'polling'],
+  allowEIO3: true
 });
 
 const PORT = process.env.PORT || 8080;
@@ -48,6 +56,12 @@ const bedrockClient = new BedrockRuntimeClient({
   })
 });
 
+// Log all requests
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
+  next();
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy' });
@@ -68,9 +82,14 @@ app.get('/languages', (req, res) => {
 // Track active sessions
 const activeSessions = new Map();
 
+// Log Socket.IO engine events
+io.engine.on('connection_error', (err) => {
+  console.error('Socket.IO connection error:', err.req, err.code, err.message, err.context);
+});
+
 // Socket.IO connection handler
 io.on('connection', (socket) => {
-  console.log(`Client connected: ${socket.id}`);
+  console.log(`✅ Client connected: ${socket.id}`);
   
   let session = null;
   let sourceLang = 'en-US';
